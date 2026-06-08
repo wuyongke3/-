@@ -3,7 +3,10 @@ import BasicUpload from './components/basicUpload.vue'
 import BigfileUpload from './components/bigfileUpload.vue'
 import FileList from './components/fileList.vue'
 
-
+if (window.Worker) {
+  // …
+  console.log(window.Worker.name)
+}
 
 </script>
 

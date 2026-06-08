@@ -15,6 +15,8 @@
 import { ref } from 'vue'
 
 
+const emit = defineEmits(['afterUploadFinish'])
+
 const isMultiple = ref(false)
 const fileList = ref<any>()
 
@@ -26,28 +28,32 @@ const handleFileChange = (e: any) => {
 
 const handleUpload = async () => {
     if (!fileList.value) return
+    // 开始上传
+    beforeUpload()
+    doUpload(fileList.value)
+    // 结束上传
+    emit('afterUploadFinish')
+}
 
-    // 普通上传走 HTTP multipart/form-data
-    const formData = new FormData()
-    formData.append('file', fileList.value)
-    formData.append('name', fileList.value.name)
-
-    for (const [key, value] of formData.entries()) {
-        console.log(key, value)
-    }
-
-    loading.value = true;
-    try {
-        const res = await fetch('http://localhost:3000/api/attement/upload', {
-            method: 'POST',
-            body: formData
-        })
-    } catch (error) {
-        console.log(error)
-    } finally {
-        console.log('finally')
-        loading.value = false;
+const doUpload = (file: File) => {
+    const bigfileUploadWorker = new Worker(new URL('../worker/test.worker.ts', import.meta.url), {
+        name: 'bigfileUploadWorker'
+    });
+    bigfileUploadWorker.postMessage({attement: file});
+    bigfileUploadWorker.onmessage = (ev) => {
+        console.log('worker 回传消息: ', ev.data)
     }
 }
+
+
+const beforeUpload = () => {
+    
+}
+
+const afterUpload = ()=>{
+    console.log(123)
+
+}
+
 
 </script>

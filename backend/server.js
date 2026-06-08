@@ -5,6 +5,7 @@ const cors = require('cors');
 const multer = require('multer');
 const fs = require('fs');
 const path = require('path');
+const WebSocket = require('ws');
 
 const PORT = 3000;
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
@@ -77,48 +78,29 @@ app.get('/api/attement/download', (req, res) => {
 // 创建 httpServer 但不独立监听，由 net server 分流调用
 const httpServer = http.createServer(app);
 
-// ─── Socket 文件处理 ───
-function handleSocketClient(socket) {
-  console.log(`[Socket连接] ${socket.remoteAddress}:${socket.remotePort}`);
-  let filename = '';
-  let filenameLen = -1;
-  let fileStream = null;
+const wss = new WebSocket.Server({ server: httpServer });
 
-  socket.on('data', (chunk) => {
-    if (filenameLen === -1) {
-      if (chunk.length < 4) return;
-      filenameLen = chunk.readUInt32BE(0);
-      const rest = chunk.slice(4);
-      if (rest.length < filenameLen) { filename = rest.toString('utf-8'); return; }
-      filename = rest.slice(0, filenameLen).toString('utf-8');
-      const after = rest.slice(filenameLen);
-      fileStream = fs.createWriteStream(path.join(UPLOAD_DIR, filename));
-      console.log(`[Socket接收] 文件名: ${filename}`);
-      if (after.length > 0) fileStream.write(after);
-      return;
+
+wss.on('connection', (ws) => {
+  console.log('[WS] Client connected');
+  
+  ws.on('message', (message) => {
+    // Handle heartbeat
+    if (message.toString() === 'hello') {
+      console.log('[WS] Heartbeat received');
+      const timestamp = Date.now();
+      ws.send(timestamp); // Optional response
+    } else {
+      // Handle other messages or file chunks
+      console.log('[WS] Received:', message);
     }
-    if (!fileStream) {
-      if (chunk.length < filenameLen) { filename += chunk.toString('utf-8'); return; }
-      filename = chunk.slice(0, filenameLen).toString('utf-8');
-      const after = chunk.slice(filenameLen);
-      fileStream = fs.createWriteStream(path.join(UPLOAD_DIR, filename));
-      console.log(`[Socket接收] 文件名: ${filename}`);
-      if (after.length > 0) fileStream.write(after);
-      return;
-    }
-    if (chunk.length > 0) fileStream.write(chunk);
   });
 
-  socket.on('end', () => {
-    if (fileStream) { fileStream.end(); console.log(`[Socket完成] ${filename} 已保存`); }
-    filenameLen = -1; filename = ''; fileStream = null;
+  ws.on('close', () => {
+    console.log('[WS] Client disconnected');
   });
+});
 
-  socket.on('error', (err) => {
-    console.error(`[Socket错误] ${err.message}`);
-    if (fileStream) fileStream.destroy();
-  });
-}
 
 // ─── 共用端口：协议检测分流 ───
 const server = net.createServer((socket) => {
