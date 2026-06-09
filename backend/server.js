@@ -9,9 +9,14 @@ const WebSocket = require('ws');
 
 const PORT = 3000;
 const UPLOAD_DIR = path.join(__dirname, 'uploads');
+const TEMP_CHUNKS_DIR = path.join(__dirname, 'temp_chunks'); // 临时存储分片的目录
 
 if (!fs.existsSync(UPLOAD_DIR)) {
   fs.mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
+if (!fs.existsSync(TEMP_CHUNKS_DIR)) {
+  fs.mkdirSync(TEMP_CHUNKS_DIR, { recursive: true });
 }
 
 // ─── multer 配置：存到 uploads 目录，使用前端传来的文件名 ───
@@ -80,27 +85,167 @@ const httpServer = http.createServer(app);
 
 const wss = new WebSocket.Server({ server: httpServer });
 
+// 存储每个客户端的连接状态和上传信息
+const clients = new Map();
 
 wss.on('connection', (ws) => {
-  console.log('[WS] Client connected');
+  const clientId = Date.now() + '-' + Math.random().toString(36).substr(2, 9);
+  console.log(`[WS] Client connected: ${clientId}`);
   
+  // 初始化客户端信息
+  clients.set(clientId, {
+    id: clientId,
+    connected: true,
+    pendingChunk: null // 存储等待处理的分片元数据
+  });
+
   ws.on('message', (message) => {
-    // Handle heartbeat
-    if (message.toString() === 'hello') {
-      console.log('[WS] Heartbeat received');
-      const timestamp = Date.now();
-      ws.send(timestamp); // Optional response
-    } else {
-      // Handle other messages or file chunks
-      console.log('[WS] Received:', message);
+    try {
+      const clientInfo = clients.get(clientId);
+      
+      // 处理心跳
+      if (message.toString() === 'hello' || message.toString() === 'ping') {
+        console.log('[WS] Heartbeat received');
+        ws.send(Date.now().toString()); // 响应心跳
+        return;
+      }
+
+      // 如果消息是字符串，检查是否为JSON格式
+      if (Buffer.isBuffer(message)) {
+        // 这是二进制数据
+        if (clientInfo.pendingChunk) {
+          // 使用暂存的元数据处理二进制数据
+          const chunkData = clientInfo.pendingChunk;
+          const { fileName, chunkIndex, totalChunks, chunkSize } = chunkData;
+          
+          // 处理二进制数据
+          handleChunkData(ws, clientId, fileName, chunkIndex, totalChunks, chunkSize, message);
+          
+          // 清除待处理的元数据
+          clientInfo.pendingChunk = null;
+        } else {
+          console.log('[WS] Received binary data without metadata, ignoring');
+        }
+      } else {
+        // 这是字符串消息，尝试解析为JSON
+        let data;
+        try {
+          data = JSON.parse(message.toString());
+        } catch (e) {
+          console.error('[WS] Invalid JSON format:', message.toString());
+          return;
+        }
+
+        // 处理不同类型的WebSocket消息
+        switch (data.type) {
+          case 'chunk':
+            // 存储分片元数据，等待二进制数据
+            clientInfo.pendingChunk = data;
+            console.log(`[WS] Received chunk metadata: ${data.fileName}, index: ${data.chunkIndex}`);
+            break;
+          default:
+            console.log(`[WS] Unknown message type: ${data.type}`, data);
+        }
+      }
+    } catch (error) {
+      console.error('[WS] Error processing message:', error);
     }
   });
 
   ws.on('close', () => {
-    console.log('[WS] Client disconnected');
+    console.log(`[WS] Client disconnected: ${clientId}`);
+    clients.delete(clientId);
+  });
+
+  ws.on('error', (error) => {
+    console.error(`[WS] Client error: ${clientId}`, error);
+    clients.delete(clientId);
   });
 });
 
+// 处理文件分片数据
+function handleChunkData(ws, clientId, fileName, chunkIndex, totalChunks, chunkSize, chunkBuffer) {
+  console.log(`[WS] Processing chunk ${chunkIndex + 1}/${totalChunks} for file: ${fileName}`);
+
+  // 确保 chunkBuffer 是 Buffer 类型
+  if (!(chunkBuffer instanceof Buffer)) {
+    chunkBuffer = Buffer.from(chunkBuffer);
+  }
+
+  // 创建临时目录存储分片
+  const fileDir = path.join(TEMP_CHUNKS_DIR, sanitizeFileName(fileName));
+  if (!fs.existsSync(fileDir)) {
+    fs.mkdirSync(fileDir, { recursive: true });
+  }
+
+  // 保存分片
+  const chunkPath = path.join(fileDir, `chunk_${chunkIndex}`);
+  fs.writeFileSync(chunkPath, chunkBuffer);
+
+  console.log(`[WS] Saved chunk ${chunkIndex} for file ${fileName}`);
+
+  // 检查是否所有分片都已接收
+  const receivedChunks = fs.readdirSync(fileDir).length;
+  if (receivedChunks === totalChunks) {
+    // 合并所有分片
+    const finalFilePath = path.join(UPLOAD_DIR, sanitizeFileName(fileName));
+    mergeChunks(fileDir, finalFilePath, totalChunks, fileName, ws);
+  }
+
+  // 发送确认消息
+  ws.send(JSON.stringify({
+    type: 'chunkAck',
+    chunkIndex,
+    fileName,
+    receivedChunks,
+    totalChunks
+  }));
+}
+
+// 合并分片
+function mergeChunks(chunkDir, finalFilePath, totalChunks, originalFileName, ws) {
+  const outputStream = fs.createWriteStream(finalFilePath);
+  let chunksProcessed = 0;
+
+  for (let i = 0; i < totalChunks; i++) {
+    const chunkPath = path.join(chunkDir, `chunk_${i}`);
+    const chunkData = fs.readFileSync(chunkPath);
+    outputStream.write(chunkData);
+    
+    // 删除已处理的分片
+    fs.unlinkSync(chunkPath);
+  }
+
+  outputStream.end();
+
+  outputStream.on('finish', () => {
+    console.log(`[WS] File ${originalFileName} merged successfully`);
+    // 删除临时目录
+    fs.rmdirSync(chunkDir);
+    
+    // 发送上传完成确认
+    ws.send(JSON.stringify({
+      type: 'uploadComplete',
+      fileName: originalFileName,
+      filePath: finalFilePath
+    }));
+  });
+
+  outputStream.on('error', (err) => {
+    console.error(`[WS] Error merging file ${originalFileName}:`, err);
+    ws.send(JSON.stringify({
+      type: 'uploadError',
+      fileName: originalFileName,
+      error: err.message
+    }));
+  });
+}
+
+// 清理文件名，防止路径遍历攻击
+function sanitizeFileName(fileName) {
+  // 移除潜在危险字符
+  return fileName.replace(/[^a-zA-Z0-9._-]/g, '_');
+}
 
 // ─── 共用端口：协议检测分流 ───
 const server = net.createServer((socket) => {
@@ -128,3 +273,20 @@ server.listen(PORT, () => {
   console.log(`  - Socket: 二进制协议 (4B文件名长度 + 文件名 + 内容)`);
   console.log(`文件保存至: ${UPLOAD_DIR}`);
 });
+
+// 处理非WebSocket的原始Socket客户端
+function handleSocketClient(socket) {
+  console.log('[Socket] Raw socket client connected');
+  // 这里可以处理非WebSocket的原始套接字连接
+  socket.on('data', (data) => {
+    console.log('[Socket] Raw data received:', data.length, 'bytes');
+  });
+
+  socket.on('close', () => {
+    console.log('[Socket] Raw socket client disconnected');
+  });
+
+  socket.on('error', (err) => {
+    console.error('[Socket] Raw socket error:', err);
+  });
+}

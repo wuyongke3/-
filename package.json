@@ -1,0 +1,23 @@
+{
+  "name": "bigfile-upload",
+  "version": "1.0.0",
+  "description": "大文件上传实现",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "dev:server": "cd backend && npm i && npm run start",
+    "dev:web": "cd frontend && npm i && npm run dev"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wuyongke3/-.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/wuyongke3/-/issues"
+  },
+  "homepage": "https://github.com/wuyongke3/-#readme"
+}
